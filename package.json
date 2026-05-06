@@ -1,0 +1,17 @@
+{
+  "name": "tagit-tap-to-buy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Physical truth for AI commerce. Tap, verify, transact, settle. EasyA Consensus Miami 2026.",
+  "license": "MIT",
+  "workspaces": [
+    "verify",
+    "api"
+  ],
+  "scripts": {
+    "build:contracts": "cd contracts && forge build",
+    "test:contracts": "cd contracts && forge test -vvv",
+    "dev:verify": "cd verify && pnpm dev",
+    "dev:api": "cd api && pnpm dev"
+  }
+}
