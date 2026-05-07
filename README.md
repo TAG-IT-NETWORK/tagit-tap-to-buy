@@ -25,11 +25,11 @@ NFC chip + on-chain twin + wallet action layer. Tap a chip, verify in 2 seconds,
 ## Demo flow
 
 1. **Tap** the VT PDRN Capsule Cream jar with any phone.
-2. **Verify** — PWA loads in <2s. AUTHENTIC. BOUND. Owner: `0x458B…`. Last verified: just now.
-3. **Pay 1¢** via Coinbase x402 → AI brief streams in (Bedrock + photo + history).
-4. **Connect Wallet** → Coinbase Smart Wallet appears (passkey, no seed phrase).
-5. **Offer 30 USDC** → `OfferEscrow` locks the funds on Base Sepolia.
-6. **Owner accepts** → atomic NFT-and-USDC swap. Ownership transfers, escrow releases.
+2. **Verify** — PWA loads in <2s. AUTHENTIC. ACTIVATED. Owner: `0x458B…`. Reads pulled live from `TAGITCore.getAsset()` on Base Sepolia. ✅ shipped
+3. **Connect Wallet** → Coinbase Smart Wallet appears (passkey, no seed phrase). ✅ shipped
+4. **Offer 30 USDC** → EIP-712 typed sig + USDC `approve` + `OfferEscrow.fundOffer` lock the funds on Base Sepolia in three sequential wallet pops. ✅ shipped, deployed
+5. **Owner accepts** → atomic NFT-and-USDC swap via `acceptOffer`. ✅ contract shipped, owner-side UI is next pass
+6. **Pay 1¢** via Coinbase x402 → AI brief from Bedrock. 🟡 backend scaffolded under `api/`, not deployed (cut from hackathon scope to ship L1 + L3 cleanly)
 7. **Tap again** — page now shows the buyer as new owner.
 
 ## Architecture
@@ -51,18 +51,17 @@ On-chain read      x402 brief         Wallet action
 
 ## Track alignment
 
-### Coinbase ($5K)
-- **Smart Wallet** powers Layer 3 (passkey, no seed phrase)
-- **x402** gates the AI brief (1¢ USDC paywall, real micropayment)
-- **Base Sepolia** hosts `OfferEscrow.sol` and settlements
+### Coinbase ($5K) — ✅ shipped on-chain
+- **Smart Wallet** powers Layer 3 (passkey, no seed phrase) — wired in `verify/lib/wallet.ts`, `coinbaseWallet({preference:'smartWalletOnly'})`
+- **Base Sepolia** hosts the verified `OfferEscrow.sol` at [`0x213767060F842A7bFF6E3Ce30249eDbd177c02c5`](https://sepolia.basescan.org/address/0x213767060F842A7bFF6E3Ce30249eDbd177c02c5) — settlements happen here
+- **x402** middleware scaffolded in `api/middleware/x402.ts` — the brief endpoint is the integration point (deployment cut from hackathon scope, see below)
 
-### AWS ($40K credits)
-- **Bedrock** generates AI brief (Claude on Bedrock)
-- **Lambda** orchestrates request flow + x402 middleware
-- **S3 + CloudFront** hosts photos
-- **DynamoDB** stores structured metadata
-- **EventBridge** logs taps for analytics
-- **Secrets Manager** holds UPS API key (P1)
+### AWS ($40K credits) — 🟡 scaffolded
+- **Bedrock** opt-in completed for `claude-haiku-4-5` in us-east-1
+- Brief endpoint code in `api/src/getBrief.ts` (Bedrock + photo + history)
+- Chip resolver code in `api/src/resolveChip.ts` (DynamoDB)
+- x402 middleware in `api/middleware/x402.ts` (1¢ USDC paywall validation)
+- **AWS deployment cut** to ship L1 + L3 cleanly within the 46-hour window. Code is repo-resident and runnable; Lambda/S3/DDB provisioning is the immediate next milestone.
 
 ## Pre-existing TAG IT NETWORK code (used as dependencies)
 
@@ -75,12 +74,16 @@ See [DISCLOSURE.md](./DISCLOSURE.md) for the full reuse manifest required by Eas
 
 ## Net-new code built during EasyA Miami (May 5–7, 2026)
 
-- `contracts/src/OfferEscrow.sol` — atomic NFT/USDC settlement on tap
-- `verify/` — three-layer PWA verification page
-- `api/getBrief/` — Bedrock + Lambda brief endpoint
-- `api/middleware/x402.ts` — 1¢ USDC paywall
-- `infra/` — S3 + DynamoDB metadata layer
-- `verify/lib/wallet.ts` — Coinbase Smart Wallet integration
+**Shipped & deployed:**
+- `contracts/src/OfferEscrow.sol` — atomic NFT/USDC settlement, EIP-712 offers, EIP-1271 smart-wallet sigs, monotonic SUN counter for tap-on-receive, timeout refund, cancel. Deployed + verified on Base Sepolia: [`0x213767060F842A7bFF6E3Ce30249eDbd177c02c5`](https://sepolia.basescan.org/address/0x213767060F842A7bFF6E3Ce30249eDbd177c02c5). 13/13 Foundry tests passing.
+- `verify/` — three-layer PWA on Next.js 14, deployed at [tagit-tap-to-buy.vercel.app](https://tagit-tap-to-buy.vercel.app). L1 reads asset state live from `TAGITCore.getAsset()`. L3 OfferForm signs EIP-712 typed offers and funds the escrow.
+- `verify/app/api/resolve/route.ts` — chip → asset binding resolver (static map for the demo asset; production wires to TAG IT registry).
+
+**Scaffolded, not deployed:**
+- `api/src/getBrief.ts` — Bedrock brief endpoint (Claude Haiku 4.5)
+- `api/middleware/x402.ts` — 1¢ USDC paywall middleware
+- `api/src/resolveChip.ts` — DynamoDB-backed chip resolver
+- `infra/seed-demo.ts` — S3 + DynamoDB seed script for metadata layer
 
 ## How to run locally
 
