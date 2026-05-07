@@ -1,12 +1,22 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useAccount, useConnect, useDisconnect, useReadContract } from 'wagmi';
-import { OFFER_ESCROW_ADDRESS } from '@/lib/wallet';
+import {
+  useAccount,
+  useChainId,
+  useConnect,
+  useDisconnect,
+  useReadContract,
+  useSignTypedData,
+  useWriteContract,
+  useWaitForTransactionReceipt,
+} from 'wagmi';
+import { parseUnits, type Hex } from 'viem';
+import { OFFER_ESCROW_ADDRESS, USDC_BASE_SEPOLIA } from '@/lib/wallet';
 import { resolveChip, type ChipBinding } from '@/lib/chip';
 import { fetchBriefPaid, type BriefResult, type X402Quote } from '@/lib/x402';
 
-const ERC721_ABI = [
+const TAGIT_ABI = [
   {
     type: 'function',
     name: 'ownerOf',
@@ -14,9 +24,31 @@ const ERC721_ABI = [
     inputs: [{ name: 'tokenId', type: 'uint256' }],
     outputs: [{ name: '', type: 'address' }],
   },
+  {
+    type: 'function',
+    name: 'getAsset',
+    stateMutability: 'view',
+    inputs: [{ name: 'tokenId', type: 'uint256' }],
+    outputs: [
+      { name: 'owner', type: 'address' },
+      { name: 'timestamp', type: 'uint64' },
+      { name: 'state', type: 'uint8' },
+      { name: 'flags', type: 'uint8' },
+      { name: 'reserved', type: 'uint16' },
+    ],
+  },
 ] as const;
 
-type LifecycleState = 'BOUND' | 'ACTIVATED' | 'CLAIMED' | 'FLAGGED' | 'NONE';
+type LifecycleState = 'NONE' | 'MINTED' | 'BOUND' | 'ACTIVATED' | 'CLAIMED' | 'FLAGGED' | 'RECYCLED';
+const STATE_NAMES: LifecycleState[] = [
+  'NONE',
+  'MINTED',
+  'BOUND',
+  'ACTIVATED',
+  'CLAIMED',
+  'FLAGGED',
+  'RECYCLED',
+];
 
 function truncate(addr?: string) {
   if (!addr) return '—';
@@ -25,28 +57,33 @@ function truncate(addr?: string) {
 
 export function VerifyClient({ chipId }: { chipId: string }) {
   const [binding, setBinding] = useState<ChipBinding | null>(null);
-  const [lifecycle, setLifecycle] = useState<LifecycleState>('CLAIMED');
-  const [lastVerifiedSec, setLastVerifiedSec] = useState<number>(0);
-  const [reputation, setReputation] = useState<{ sales: number; disputes: number }>({ sales: 12, disputes: 0 });
+  const [reputation] = useState<{ sales: number; disputes: number }>({ sales: 12, disputes: 0 });
 
   useEffect(() => {
     let mounted = true;
     resolveChip(chipId).then((b) => mounted && setBinding(b));
-    setLastVerifiedSec(Math.floor(Date.now() / 1000) - 30);
     return () => {
       mounted = false;
     };
   }, [chipId]);
 
-  const { data: ownerOf } = useReadContract({
+  const { data: assetData } = useReadContract({
     address: binding?.nft,
-    abi: ERC721_ABI,
-    functionName: 'ownerOf',
+    abi: TAGIT_ABI,
+    functionName: 'getAsset',
     args: binding ? [binding.tokenId] : undefined,
     query: { enabled: !!binding },
   });
 
-  const owner = ownerOf as `0x${string}` | undefined;
+  const tuple = assetData as
+    | readonly [`0x${string}`, bigint, number, number, number]
+    | undefined;
+  const owner = tuple?.[0];
+  const timestampRaw = tuple?.[1];
+  const stateRaw = tuple?.[2];
+  const lifecycle: LifecycleState =
+    stateRaw !== undefined && stateRaw < STATE_NAMES.length ? STATE_NAMES[stateRaw] : 'NONE';
+  const lastVerifiedSec = timestampRaw ? Number(timestampRaw) : 0;
 
   return (
     <div className="mx-auto max-w-md flex flex-col gap-6">
@@ -255,20 +292,179 @@ function Layer3Action({ binding, owner }: { binding: ChipBinding | null; owner?:
   );
 }
 
+const OFFER_TYPES = {
+  Offer: [
+    { name: 'buyer', type: 'address' },
+    { name: 'nft', type: 'address' },
+    { name: 'tokenId', type: 'uint256' },
+    { name: 'paymentToken', type: 'address' },
+    { name: 'amount', type: 'uint256' },
+    { name: 'nonce', type: 'uint256' },
+    { name: 'deadline', type: 'uint256' },
+  ],
+} as const;
+
+const ERC20_APPROVE_ABI = [
+  {
+    type: 'function',
+    name: 'approve',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'spender', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [{ type: 'bool' }],
+  },
+] as const;
+
+const FUND_OFFER_ABI = [
+  {
+    type: 'function',
+    name: 'fundOffer',
+    stateMutability: 'nonpayable',
+    inputs: [
+      {
+        name: 'offer',
+        type: 'tuple',
+        components: [
+          { name: 'buyer', type: 'address' },
+          { name: 'nft', type: 'address' },
+          { name: 'tokenId', type: 'uint256' },
+          { name: 'paymentToken', type: 'address' },
+          { name: 'amount', type: 'uint256' },
+          { name: 'nonce', type: 'uint256' },
+          { name: 'deadline', type: 'uint256' },
+        ],
+      },
+      { name: 'signature', type: 'bytes' },
+    ],
+    outputs: [{ type: 'bytes32' }],
+  },
+] as const;
+
+type Stage = 'idle' | 'signing' | 'approving' | 'approve-wait' | 'funding' | 'fund-wait' | 'done' | 'error';
+
 function OfferForm({ binding, owner }: { binding: ChipBinding; owner?: `0x${string}` }) {
   const [amount, setAmount] = useState<string>('30');
-  const [submitting, setSubmitting] = useState(false);
+  const [stage, setStage] = useState<Stage>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const [signature, setSignature] = useState<Hex | null>(null);
+  const [offer, setOffer] = useState<{
+    buyer: `0x${string}`;
+    nft: `0x${string}`;
+    tokenId: bigint;
+    paymentToken: `0x${string}`;
+    amount: bigint;
+    nonce: bigint;
+    deadline: bigint;
+  } | null>(null);
+
+  const { address } = useAccount();
+  const chainId = useChainId();
+  const { signTypedDataAsync } = useSignTypedData();
+  const { writeContractAsync } = useWriteContract();
+
+  const [approveHash, setApproveHash] = useState<Hex | undefined>();
+  const [fundHash, setFundHash] = useState<Hex | undefined>();
+  const { isSuccess: approveDone } = useWaitForTransactionReceipt({ hash: approveHash });
+  const { isSuccess: fundDone } = useWaitForTransactionReceipt({ hash: fundHash });
+
+  // Once approve is mined, fire the fundOffer call.
+  useEffect(() => {
+    if (!approveDone || !offer || !signature || stage !== 'approve-wait') return;
+    (async () => {
+      try {
+        setStage('funding');
+        const hash = await writeContractAsync({
+          address: OFFER_ESCROW_ADDRESS,
+          abi: FUND_OFFER_ABI,
+          functionName: 'fundOffer',
+          args: [offer, signature],
+        });
+        setFundHash(hash);
+        setStage('fund-wait');
+      } catch (e) {
+        setError(String((e as Error).message ?? e));
+        setStage('error');
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [approveDone]);
+
+  // Final state.
+  useEffect(() => {
+    if (fundDone && stage === 'fund-wait') setStage('done');
+  }, [fundDone, stage]);
 
   async function submit() {
-    setSubmitting(true);
+    setError(null);
+    setStage('signing');
     try {
-      // TODO: build EIP-712 typed offer, sign via wagmi, fund escrow.
-      // Wired in next pass. See contracts/src/OfferEscrow.sol fundOffer().
-      console.log('offer submit', { binding, owner, amount });
-    } finally {
-      setSubmitting(false);
+      if (!address) throw new Error('Wallet not connected');
+      if (OFFER_ESCROW_ADDRESS === '0x0000000000000000000000000000000000000000') {
+        throw new Error('OfferEscrow not configured');
+      }
+
+      const wei = parseUnits(amount || '0', 6);
+      if (wei <= 0n) throw new Error('Amount must be > 0');
+
+      const built = {
+        buyer: address as `0x${string}`,
+        nft: binding.nft,
+        tokenId: binding.tokenId,
+        paymentToken: USDC_BASE_SEPOLIA as `0x${string}`,
+        amount: wei,
+        nonce: BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000)),
+        deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
+      };
+
+      const sig = (await signTypedDataAsync({
+        domain: {
+          name: 'TagItOfferEscrow',
+          version: '1',
+          chainId,
+          verifyingContract: OFFER_ESCROW_ADDRESS,
+        },
+        types: OFFER_TYPES,
+        primaryType: 'Offer',
+        message: built,
+      })) as Hex;
+
+      setOffer(built);
+      setSignature(sig);
+
+      setStage('approving');
+      const aHash = await writeContractAsync({
+        address: USDC_BASE_SEPOLIA,
+        abi: ERC20_APPROVE_ABI,
+        functionName: 'approve',
+        args: [OFFER_ESCROW_ADDRESS, wei],
+      });
+      setApproveHash(aHash);
+      setStage('approve-wait');
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+      setStage('error');
     }
   }
+
+  const busy = stage !== 'idle' && stage !== 'done' && stage !== 'error';
+  const label =
+    stage === 'idle'
+      ? `Offer ${amount} USDC`
+      : stage === 'signing'
+        ? 'Sign offer in wallet…'
+        : stage === 'approving'
+          ? 'Approve USDC in wallet…'
+          : stage === 'approve-wait'
+            ? 'Approval confirming…'
+            : stage === 'funding'
+              ? 'Fund escrow in wallet…'
+              : stage === 'fund-wait'
+                ? 'Funding confirming…'
+                : stage === 'done'
+                  ? '✓ Offer funded'
+                  : 'Try again';
 
   return (
     <div className="mt-3 space-y-3">
@@ -278,18 +474,33 @@ function OfferForm({ binding, owner }: { binding: ChipBinding; owner?: `0x${stri
         inputMode="decimal"
         value={amount}
         onChange={(e) => setAmount(e.target.value)}
-        className="w-full rounded-xl bg-zinc-900 border border-zinc-800 px-4 py-3 font-mono"
+        disabled={busy}
+        className="w-full rounded-xl bg-zinc-900 border border-zinc-800 px-4 py-3 font-mono disabled:opacity-50"
       />
       <button
-        disabled={submitting}
+        disabled={busy}
         onClick={submit}
         className="w-full rounded-xl bg-tagit-accent text-black font-semibold py-3 active:scale-[0.99] transition disabled:opacity-50"
       >
-        {submitting ? 'Submitting…' : `Offer ${amount} USDC`}
+        {label}
       </button>
-      <p className="text-[11px] text-zinc-500">
-        Funds locked in escrow until owner accepts or you tap on receive. 24h timeout refund.
-      </p>
+      {error && <p className="text-[11px] text-tagit-danger break-words">{error}</p>}
+      {fundHash && (
+        <a
+          className="block text-[11px] text-zinc-500 underline-offset-4 hover:underline"
+          href={`https://sepolia.basescan.org/tx/${fundHash}`}
+          target="_blank"
+          rel="noreferrer"
+        >
+          View funding tx ↗
+        </a>
+      )}
+      {owner && (
+        <p className="text-[11px] text-zinc-500">
+          Funds locked in escrow until <span className="font-mono">{truncate(owner)}</span> accepts
+          or you tap on receive. 24h timeout refund.
+        </p>
+      )}
     </div>
   );
 }
