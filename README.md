@@ -1,10 +1,16 @@
 # TAG IT Tap-to-Buy
 
+![TAG IT Tap-to-Buy — Physical truth for AI commerce](docs/banner.png)
+
 > Physical truth for AI commerce. Tap, verify, transact, settle — all in seconds.
 
 **Built at EasyA Consensus Hackathon Miami, May 5–7, 2026**
 **Tracks**: Coinbase ($5K) + AWS ($40K credits)
 **Project lead**: Artemus Prime, Founder & CEO, [TAG IT NETWORK](https://tagit.network)
+
+**Live demo**: [tagit-tap-to-buy.vercel.app/verify/test-chip](https://tagit-tap-to-buy.vercel.app/verify/test-chip)
+**OfferEscrow on Base Sepolia**: [`0x213767060F842A7bFF6E3Ce30249eDbd177c02c5`](https://sepolia.basescan.org/address/0x213767060F842A7bFF6E3Ce30249eDbd177c02c5)
+**Demo asset**: VT PDRN Capsule Cream 100 — token #5 on Base Sepolia, IPFS metadata `QmZLqbsFDKpHc4BsnP4fVcNd4PEi6JriR9MUmJ9bia6oKQ`
 
 ---
 
